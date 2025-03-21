@@ -5,9 +5,10 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
-import { Loader2, FileText, Clock, CheckCircle2, AlertCircle } from "lucide-react";
+import { Loader2, FileText, Clock, CheckCircle2, AlertCircle, UserCircle } from "lucide-react";
 import { ref, get, query, orderByChild, equalTo } from "firebase/database";
 import { database } from "@/firebase";
+import { toast } from "sonner";
 
 export const MyAssignments = () => {
   const { user } = useAuth();
@@ -54,52 +55,80 @@ export const MyAssignments = () => {
           const assignmentSnapshot = await get(assignmentsRef);
           if (assignmentSnapshot.exists()) {
             assignmentSnapshot.forEach((childSnapshot) => {
+              const assignmentData = {
+                id: childSnapshot.key,
+                ...childSnapshot.val()
+              };
+              
               // Get course details
-              const courseRef = ref(database, `courses/${courseId}`);
-              get(courseRef).then((courseSnapshot) => {
-                if (courseSnapshot.exists()) {
-                  assignmentsData.push({
-                    id: childSnapshot.key,
-                    ...childSnapshot.val(),
-                    course_name: courseSnapshot.val().title
-                  });
-                }
-              });
+              assignmentsData.push(assignmentData);
             });
           }
         }
         
-        // Get submissions for the user
-        const submissionsRef = query(
-          ref(database, 'submissions'),
-          orderByChild('user_id'),
-          equalTo(user.id)
+        // Process assignments with course and teacher information
+        const assignmentsWithDetails = await Promise.all(
+          assignmentsData.map(async (assignment) => {
+            // Get course details
+            const courseRef = ref(database, `courses/${assignment.course_id}`);
+            const courseSnapshot = await get(courseRef);
+            let courseName = 'Unknown Course';
+            let teacherName = 'Unknown Teacher';
+            let teacherId = null;
+            
+            if (courseSnapshot.exists()) {
+              const courseData = courseSnapshot.val();
+              courseName = courseData.title;
+              teacherId = courseData.instructor_id;
+              
+              // Get teacher details if instructor_id exists
+              if (teacherId) {
+                const teacherRef = ref(database, `users/${teacherId}`);
+                const teacherSnapshot = await get(teacherRef);
+                if (teacherSnapshot.exists()) {
+                  teacherName = teacherSnapshot.val().name;
+                }
+              }
+            }
+            
+            // Get submission status for this assignment
+            const submissionsRef = query(
+              ref(database, 'submissions'),
+              orderByChild('assignment_id'),
+              equalTo(assignment.id)
+            );
+            
+            const submissionSnapshot = await get(submissionsRef);
+            let submission = null;
+            
+            // Check if this user has a submission
+            if (submissionSnapshot.exists()) {
+              submissionSnapshot.forEach((childSnapshot) => {
+                const submissionData = childSnapshot.val();
+                if (submissionData.user_id === user.id) {
+                  submission = {
+                    id: childSnapshot.key,
+                    ...submissionData
+                  };
+                }
+              });
+            }
+            
+            return {
+              ...assignment,
+              course_name: courseName,
+              teacher_name: teacherName,
+              teacher_id: teacherId,
+              submitted: !!submission,
+              submission: submission
+            };
+          })
         );
         
-        const submissionsSnapshot = await get(submissionsRef);
-        const submissions = [];
-        if (submissionsSnapshot.exists()) {
-          submissionsSnapshot.forEach((childSnapshot) => {
-            submissions.push({
-              id: childSnapshot.key,
-              ...childSnapshot.val()
-            });
-          });
-        }
-        
-        // Combine assignments with submission status
-        const assignmentsWithSubmissions = assignmentsData.map(assignment => {
-          const submission = submissions.find(s => s.assignment_id === assignment.id);
-          return {
-            ...assignment,
-            submitted: !!submission,
-            submission: submission || null
-          };
-        });
-        
-        setAssignments(assignmentsWithSubmissions);
+        setAssignments(assignmentsWithDetails);
       } catch (error) {
         console.error("Error fetching assignments:", error);
+        toast.error("Failed to load assignments. Please try again.");
       } finally {
         setIsLoading(false);
       }
@@ -185,9 +214,17 @@ const AssignmentCard = ({ assignment }: { assignment: any }) => {
       </Badge>
     );
   };
+
+  const handleStartAssignment = () => {
+    if (assignment.submitted) {
+      toast.info("You have already submitted this assignment");
+    } else {
+      toast.info("Starting assignment. This functionality will be available soon.");
+    }
+  };
   
   return (
-    <Card>
+    <Card className="overflow-hidden">
       <CardHeader className="pb-2">
         <div className="flex justify-between items-start">
           <CardTitle className="text-lg">{assignment.title}</CardTitle>
@@ -198,7 +235,7 @@ const AssignmentCard = ({ assignment }: { assignment: any }) => {
       <CardContent>
         <p className="text-sm mb-4 line-clamp-2">{assignment.description || 'No description provided.'}</p>
         
-        <div className="flex justify-between items-center text-sm text-muted-foreground mb-4">
+        <div className="flex justify-between items-center text-sm text-muted-foreground mb-2">
           <div className="flex items-center">
             <Clock className="h-4 w-4 mr-1" />
             {dueDate ? dueDate.toLocaleDateString() : 'No due date'}
@@ -206,7 +243,16 @@ const AssignmentCard = ({ assignment }: { assignment: any }) => {
           <div>{assignment.points} points</div>
         </div>
         
-        <Button variant={assignment.submitted ? "outline" : "default"} className="w-full">
+        <div className="flex items-center text-sm text-muted-foreground mb-4">
+          <UserCircle className="h-4 w-4 mr-1" />
+          <span>Assigned by: {assignment.teacher_name}</span>
+        </div>
+        
+        <Button 
+          variant={assignment.submitted ? "outline" : "default"} 
+          className="w-full"
+          onClick={handleStartAssignment}
+        >
           {assignment.submitted ? 'View Submission' : 'Start Assignment'}
         </Button>
       </CardContent>

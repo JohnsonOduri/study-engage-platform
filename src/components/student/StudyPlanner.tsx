@@ -1,65 +1,29 @@
+
 import React, { useState, useEffect } from "react";
 import { useAuth } from "@/contexts/AuthContext";
-import { Card, CardContent, CardHeader, CardTitle, CardFooter } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Calendar } from "@/components/ui/calendar";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { 
-  Calendar as CalendarIcon, 
-  Clock, 
-  BookOpen,
-  Check,
-  Plus,
-  RotateCw,
-  FileText,
-  Trash2,
-  Bot
-} from "lucide-react";
-import { format } from "date-fns";
-import { cn } from "@/lib/utils";
+import { CourseTaskGroup as CourseTaskGroupComponent } from "./CourseTaskGroup";
+import { AddStudySession } from "./AddStudySession";
+import { StudyTips } from "./StudyTips";
+import { StudyPlannerHeader } from "./StudyPlannerHeader";
+import { CourseTaskGroup } from "./types/StudyPlannerTypes";
 import { toast } from "sonner";
-import { db } from "../../../src/firebase.jsx"; // Adjust the import path
-import { collection, query, where, getDocs, doc, updateDoc, deleteDoc, addDoc } from "firebase/firestore";
+import * as StudyPlannerService from "./services/StudyPlannerService";
 
 export const StudyPlanner = () => {
   const { user, isAuthenticated } = useAuth();
   const [date, setDate] = useState<Date | undefined>(new Date());
-  const [studyPlanData, setStudyPlanData] = useState([]);
+  const [studyPlanData, setStudyPlanData] = useState<CourseTaskGroup[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
-  // Fetch study plan data from Firestore
   const fetchStudyPlan = async () => {
     if (!isAuthenticated || !user) return;
 
     try {
-      const querySnapshot = await getDocs(
-        query(
-          collection(db, "study_plans"),
-          where("user_id", "==", user.uid) // Filter by user ID
-        )
-      );
-
-      const tasks = querySnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      }));
-
-      // Group tasks by course
-      const groupedData = tasks.reduce((acc, task) => {
-        const course = acc.find(c => c.title === task.course);
-        if (course) {
-          course.tasks.push(task);
-        } else {
-          acc.push({ title: task.course, tasks: [task] });
-        }
-        return acc;
-      }, []);
-
-      setStudyPlanData(groupedData);
+      setIsLoading(true);
+      const data = await StudyPlannerService.fetchStudyPlan(user.id);
+      setStudyPlanData(data);
     } catch (error) {
-      console.error("Error fetching study plan:", error);
+      console.error("Error in fetchStudyPlan:", error);
       toast.error("Failed to fetch study plan");
     } finally {
       setIsLoading(false);
@@ -70,50 +34,13 @@ export const StudyPlanner = () => {
     fetchStudyPlan();
   }, [isAuthenticated, user]);
 
-  // Add a new task to Firestore
-  const addTask = async (formData) => {
+  const handleFormSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    
     if (!isAuthenticated || !user) {
       toast.error("Please login to add a task");
       return;
     }
-
-    try {
-      const { title, course, time, duration } = formData;
-      const newTask = {
-        user_id: user.uid,
-        course,
-        title,
-        duration: parseInt(duration),
-        time,
-        completed: false,
-        created_at: new Date().toISOString()
-      };
-
-      const docRef = await addDoc(collection(db, "study_plans"), newTask);
-      toast.success("Task added successfully!");
-
-      // Update local state
-      setStudyPlanData(prevData => {
-        const courseIndex = prevData.findIndex(c => c.title === course);
-        if (courseIndex !== -1) {
-          const updatedCourse = {
-            ...prevData[courseIndex],
-            tasks: [...prevData[courseIndex].tasks, { id: docRef.id, ...newTask }]
-          };
-          return [...prevData.slice(0, courseIndex), updatedCourse, ...prevData.slice(courseIndex + 1)];
-        } else {
-          return [...prevData, { title: course, tasks: [{ id: docRef.id, ...newTask }] }];
-        }
-      });
-    } catch (error) {
-      console.error("Error adding task:", error);
-      toast.error("Failed to add task");
-    }
-  };
-
-  // Handle form submission for adding a new task
-  const handleFormSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault(); // Prevent the default form submission behavior
 
     // Get form data
     const formData = new FormData(e.currentTarget);
@@ -131,254 +58,96 @@ export const StudyPlanner = () => {
     }
 
     // Add the task to Firestore
-    await addTask(formValues);
+    const newTask = await StudyPlannerService.addTask(user.id, formValues);
+    
+    if (newTask) {
+      // Update local state
+      setStudyPlanData(prevData => {
+        const courseIndex = prevData.findIndex(c => c.title === formValues.course);
+        if (courseIndex !== -1) {
+          const updatedCourse = {
+            ...prevData[courseIndex],
+            tasks: [...prevData[courseIndex].tasks, newTask]
+          };
+          return [...prevData.slice(0, courseIndex), updatedCourse, ...prevData.slice(courseIndex + 1)];
+        } else {
+          return [...prevData, { title: formValues.course, tasks: [newTask] }];
+        }
+      });
 
-    // Reset the form
-    (e.target as HTMLFormElement).reset();
+      // Reset the form
+      (e.target as HTMLFormElement).reset();
+    }
   };
-  // Rest of the component code...
+
+  const handleToggleTaskCompletion = async (courseTitle: string, taskId: string) => {
+    // Find the task in the local state
+    const courseIndex = studyPlanData.findIndex(c => c.title === courseTitle);
+    if (courseIndex === -1) return;
+    
+    const taskIndex = studyPlanData[courseIndex].tasks.findIndex(t => t.id === taskId);
+    if (taskIndex === -1) return;
+    
+    const task = studyPlanData[courseIndex].tasks[taskIndex];
+    
+    // Update in Firestore
+    const success = await StudyPlannerService.toggleTaskCompletion(taskId, task.completed);
+    
+    if (success) {
+      // Update local state
+      const updatedData = [...studyPlanData];
+      updatedData[courseIndex].tasks[taskIndex] = {
+        ...task,
+        completed: !task.completed
+      };
+      
+      setStudyPlanData(updatedData);
+    }
+  };
+  
+  const handleDeleteTask = async (courseTitle: string, taskId: string) => {
+    // Delete from Firestore
+    const success = await StudyPlannerService.deleteTask(taskId);
+    
+    if (success) {
+      // Update local state
+      const updatedData = studyPlanData.map(course => {
+        if (course.title === courseTitle) {
+          return {
+            ...course,
+            tasks: course.tasks.filter(task => task.id !== taskId)
+          };
+        }
+        return course;
+      }).filter(course => course.tasks.length > 0); // Remove empty courses
+      
+      setStudyPlanData(updatedData);
+    }
+  };
+  
   return (
     <div className="space-y-6">
       <div className="space-y-6">
-        <div className="flex flex-col md:flex-row justify-between md:items-center gap-4">
-          <div>
-            <h2 className="text-2xl font-bold">Study Planner</h2>
-            <p className="text-muted-foreground">
-              Plan your study sessions and track your progress
-            </p>
-          </div>
-
-          <div className="flex gap-2">
-            <Popover>
-              <PopoverTrigger asChild>
-                <Button
-                  variant="outline"
-                  className="w-fit flex items-center gap-2"
-                >
-                  <CalendarIcon className="h-4 w-4" />
-                  {date ? format(date, "PPP") : "Pick a date"}
-                </Button>
-              </PopoverTrigger>
-              <PopoverContent className="w-auto p-0">
-                <Calendar
-                  mode="single"
-                  selected={date}
-                  onSelect={setDate}
-                  initialFocus
-                />
-              </PopoverContent>
-            </Popover>
-
-            <Button
-              className="gap-2"
-              disabled={true} // Disable the button for now
-            >
-              <Bot className="h-4 w-4" />
-              Generate AI Plan (Coming Soon)
-            </Button>
-          </div>
-        </div>
+        <StudyPlannerHeader date={date} setDate={setDate} />
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2 space-y-6">
             {studyPlanData.map((course) => (
-              <Card key={course.id}>
-                <CardHeader>
-                  <CardTitle>{course.title}</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <div className="space-y-4">
-                    {course.tasks.map((task) => (
-                      <div
-                        key={task.id}
-                        className={cn(
-                          "flex items-center justify-between p-4 border rounded-lg",
-                          task.completed
-                            ? "border-green-200 bg-green-50 dark:bg-green-900/10"
-                            : "border-border"
-                        )}
-                      >
-                        <div className="flex items-start gap-3">
-                          <div
-                            className={cn(
-                              "w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5 cursor-pointer",
-                              task.completed
-                                ? "bg-green-500"
-                                : "border border-muted"
-                            )}
-                            onClick={() =>
-                              toggleTaskCompletion(course.id, task.id)
-                            }
-                          >
-                            {task.completed && (
-                              <Check className="h-4 w-4 text-white" />
-                            )}
-                          </div>
-                          <div>
-                            <h4 className="font-medium">{task.title}</h4>
-                            <div className="flex items-center gap-3 mt-1 text-sm text-muted-foreground">
-                              <div className="flex items-center">
-                                <Clock className="h-3.5 w-3.5 mr-1" />
-                                {task.time}
-                              </div>
-                              <div className="flex items-center">
-                                <Clock className="h-3.5 w-3.5 mr-1" />
-                                {task.duration} min
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-
-                        <div className="flex gap-2">
-                          {!task.completed && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              className="text-green-600 border-green-200"
-                              onClick={() =>
-                                toggleTaskCompletion(course.id, task.id)
-                              }
-                            >
-                              <Check className="h-4 w-4" />
-                            </Button>
-                          )}
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => deleteTask(course.id, task.id)}
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </CardContent>
-                <CardFooter>
-                  <Button variant="outline" className="w-full gap-2">
-                    <Plus className="h-4 w-4" />
-                    Add Task
-                  </Button>
-                </CardFooter>
-              </Card>
+              <CourseTaskGroupComponent
+                key={course.title}
+                course={course}
+                onToggleTaskCompletion={handleToggleTaskCompletion}
+                onDeleteTask={handleDeleteTask}
+              />
             ))}
           </div>
 
           <div className="space-y-6">
-            <Card>
-              <CardHeader>
-                <CardTitle>Add Study Session</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <form className="space-y-4" onSubmit={handleFormSubmit}>
-                  <div className="space-y-2">
-                    <Label htmlFor="task-title">Task Title</Label>
-                    <Input
-                      id="task-title"
-                      name="task-title"
-                      placeholder="Enter task title"
-                    />
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label htmlFor="course">Course</Label>
-                    <Input
-                      id="course"
-                      name="course"
-                      placeholder="Select course"
-                    />
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="space-y-2">
-                      <Label htmlFor="time">Start Time</Label>
-                      <Input id="time" name="time" type="time" />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="duration">Duration (min)</Label>
-                      <Input
-                        id="duration"
-                        name="duration"
-                        type="number"
-                        min="5"
-                        step="5"
-                        defaultValue="30"
-                      />
-                    </div>
-                  </div>
-
-                  <Button type="submit" className="w-full mt-2">
-                    Add to Plan
-                  </Button>
-                </form>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle>Study Tips</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="space-y-4">
-                  <div className="flex gap-3">
-                    <div className="bg-primary/10 p-2 rounded-full h-fit">
-                      <Clock className="h-4 w-4 text-primary" />
-                    </div>
-                    <div>
-                      <h4 className="font-medium">Pomodoro Technique</h4>
-                      <p className="text-sm text-muted-foreground">
-                        Study for 25 minutes, then take a 5-minute break.
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="flex gap-3">
-                    <div className="bg-primary/10 p-2 rounded-full h-fit">
-                      <RotateCw className="h-4 w-4 text-primary" />
-                    </div>
-                    <div>
-                      <h4 className="font-medium">Spaced Repetition</h4>
-                      <p className="text-sm text-muted-foreground">
-                        Review material at increasing intervals for better
-                        retention.
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="flex gap-3">
-                    <div className="bg-primary/10 p-2 rounded-full h-fit">
-                      <BookOpen className="h-4 w-4 text-primary" />
-                    </div>
-                    <div>
-                      <h4 className="font-medium">Active Recall</h4>
-                      <p className="text-sm text-muted-foreground">
-                        Test yourself rather than passively reviewing notes.
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="flex gap-3">
-                    <div className="bg-primary/10 p-2 rounded-full h-fit">
-                      <FileText className="h-4 w-4 text-primary" />
-                    </div>
-                    <div>
-                      <h4 className="font-medium">Cornell Note-Taking</h4>
-                      <p className="text-sm text-muted-foreground">
-                        Divide your notes into main points, details, and
-                        summary.
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
+            <AddStudySession onSubmit={handleFormSubmit} />
+            <StudyTips />
           </div>
         </div>
       </div>
     </div>
   );
 };
-
-
-
-    

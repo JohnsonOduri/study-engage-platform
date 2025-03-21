@@ -14,9 +14,7 @@ import {
   getAuth, 
   createUserWithEmailAndPassword, 
   updateProfile, 
-  deleteUser,
-  listUsers,
-  updateUser
+  deleteUser
 } from "firebase/auth";
 import { ref, set, get, remove, update } from "firebase/database";
 import { database } from "@/firebase";
@@ -400,4 +398,3 @@ export const UserManagement = () => {
     </div>
   );
 };
-
